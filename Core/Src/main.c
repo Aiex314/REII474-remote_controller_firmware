@@ -21,7 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+
 #include "st7920_driver.h"
+#include "nRF24_driver.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,12 +48,16 @@ ADC_HandleTypeDef hadc1;
 SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi3;
 
+TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim11;
 
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 TIM_HandleTypeDef* lcd_us_timer = &htim11;
+
+SPI_HandleTypeDef* nrf_spi = &hspi1;
 SPI_HandleTypeDef* lcd_spi = &hspi3;
 /* USER CODE END PV */
 
@@ -62,12 +69,113 @@ static void MX_ADC1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM11_Init(void);
+static void MX_TIM4_Init(void);
+static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint16_t POT_result = 2048;
+uint8_t rwp_mode = 1;
+
+float rpm = 0.0, pitch, roll, yaw;
+
+uint8_t button_state[4] = {0};
+uint8_t button_prev_state[4]  = {0};
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
+  // Operate the nRF24 at 100Hz
+  if (htim == &htim4) {
+    // Payload buffers
+    uint8_t tx_payload[32];
+    uint8_t rx_payload[32];
+
+    // Put the potentiometer reading in the transmit buffer
+    int16_t potentiometer_value = POT_result-2048;
+    tx_payload[0] = (potentiometer_value & 0xff00) >> 8;
+    tx_payload[1] = potentiometer_value & 0x00ff;
+    tx_payload[2] = rwp_mode;
+
+
+
+    // If the nRF24 received a response packet, get and parse it.
+    uint8_t status = readNRF24status();
+    if ((status & 0b00100000) != 0) {
+      // Retrieve acknowledgement payload
+      readNRF24payload(rx_payload, 16);
+
+      // Convert the raw values into an RPM
+      int16_t pulses = rx_payload[2] * 0x100 + rx_payload[3];
+      rpm = (6000.0f / 512.0f) * (float)pulses;
+
+      // Convert the raw values into yaw, pitch and roll
+      uint8_t* pitch_bytes = (uint8_t*)(&pitch);
+      pitch_bytes[0] = rx_payload[4];
+      pitch_bytes[1] = rx_payload[5];
+      pitch_bytes[2] = rx_payload[6];
+      pitch_bytes[3] = rx_payload[7];
+
+      uint8_t* roll_bytes = (uint8_t*)(&roll);
+      roll_bytes[0] = rx_payload[8];
+      roll_bytes[1] = rx_payload[9];
+      roll_bytes[2] = rx_payload[10];
+      roll_bytes[3] = rx_payload[11];
+
+      uint8_t* yaw_bytes = (uint8_t*)(&yaw);
+      yaw_bytes[0] = rx_payload[12];
+      yaw_bytes[1] = rx_payload[13];
+      yaw_bytes[2] = rx_payload[14];
+      yaw_bytes[3] = rx_payload[15];
+
+//      char out_buf[32];
+//      sprintf(out_buf, "Pitch: %.3f\r\n", pitch);
+//      uint8_t len = strlen(out_buf);
+//      HAL_UART_Transmit(&huart6, (uint8_t*)out_buf, len, 10);
+
+      // Clear TX DS interrupt
+      writeNRF24register(N24_STATUS, status | 0b00100000);
+    }
+
+    // On retransmission overflow, silently ignore...
+    if ((status & 0b00010000) != 0) {
+      writeNRF24register(N24_STATUS, status | 0b00010000);
+    }
+
+    // Always send a new payload
+    sendNRF24payload(tx_payload, 8);
+  }
+  // Sample and debounce the buttons at 1kHz
+  else if (htim == &htim5) {
+    // Sample the buttons
+    GPIO_PinState btn1 = HAL_GPIO_ReadPin(BTN_2_GPIO_Port, BTN_2_Pin); // Yes, the numbers disagree
+    GPIO_PinState btn2 = HAL_GPIO_ReadPin(BTN_1_GPIO_Port, BTN_1_Pin); // I built the remote incorrectly...
+    GPIO_PinState btn3 = HAL_GPIO_ReadPin(BTN_4_GPIO_Port, BTN_4_Pin);
+    GPIO_PinState btn4 = HAL_GPIO_ReadPin(BTN_3_GPIO_Port, BTN_3_Pin);
+
+    GPIO_PinState cur_states[4] = {
+      btn1,
+      btn2,
+      btn3,
+      btn4
+    };
+
+    static uint8_t button_counters[4];
+
+    for (int i=0; i<4; i++) {
+      button_prev_state[i] = button_state[i];
+
+      if (cur_states[i] == GPIO_PIN_SET) button_counters[i] = 0;
+
+      if (button_counters[i] >= 5) button_state[i] = 1;
+      else {
+        button_state[i] = 0;
+        ++button_counters[i];
+      }
+    }
+  }
+}
 
 
 /* USER CODE END 0 */
@@ -106,20 +214,29 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_TIM11_Init();
+  MX_TIM4_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
+
 
   HAL_TIM_Base_Start(&htim11);
 
   // Initialize the LCD
-  LCD_init();
-
+  LCDinit();
   LCDsetGraphicMode(1);
-  LCDclearGraphics(0);
-
   LCDdrawBootScreen();
   LCDupdateFromBuffer();
 
-  HAL_Delay(200);
+  // Initialize the nRF24
+  NRF24init();
+
+  // Start the nRF24 timer
+  HAL_TIM_Base_Start_IT(&htim4);
+
+  // Start sampling the buttons
+  HAL_TIM_Base_Start_IT(&htim5);
+
+  HAL_Delay(500);
 
   LCDclearBuffer(0);
   LCDupdateFromBuffer();
@@ -129,34 +246,52 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  float t = 0.0f;
-  uint8_t buffer[16];
+  uint8_t buffer[32];
 
+  uint8_t edge = 0;
   while (1)
   {
-    // Get and display button states
-    GPIO_PinState btn1 = HAL_GPIO_ReadPin(BTN_1_GPIO_Port, BTN_1_Pin);
-    GPIO_PinState btn2 = HAL_GPIO_ReadPin(BTN_2_GPIO_Port, BTN_2_Pin);
-    GPIO_PinState btn3 = HAL_GPIO_ReadPin(BTN_3_GPIO_Port, BTN_3_Pin);
-    GPIO_PinState btn4 = HAL_GPIO_ReadPin(BTN_4_GPIO_Port, BTN_4_Pin);
+    if (edge == 0 && button_state[0] == 1) {
+      edge = 1;
+      rwp_mode = 1 - rwp_mode;
+    }
+    else if (button_state[0] == 0)
+      edge = 0;
 
-    sprintf(buffer, "BTNS [%d%d%d%d]", btn1, btn2, btn3, btn4);
+    sprintf((char*)buffer, "BTNS [%.1d%.1d%.1d%.1d]", button_state[0], button_state[1], button_state[2], button_state[3]);
     LCDdrawEmphString(buffer, 11, 0, 0);
 
 
     // Get a reading from the potentiometer
     HAL_ADC_Start(&hadc1);
     HAL_ADC_PollForConversion(&hadc1, 1);
-    uint16_t ADC_result = HAL_ADC_GetValue(&hadc1);
-    float voltage = 3.3/4096.0 * ADC_result;
-
-    sprintf(buffer, "POT  %1.02fV", voltage);
+    POT_result = HAL_ADC_GetValue(&hadc1);
+    float voltage = 3.3/4096.0 * POT_result;
+    // And display it
+    sprintf((char*)buffer, "POT  %1.02fV", voltage);
     LCDdrawString(buffer, 10, 10, 0);
-
-
     LCDupdateFromBuffer();
 
-    t += 0.1;
+
+    // Display the received data
+    sprintf((char*)buffer, "RPM   %5d", (int)rpm);
+    LCDdrawString(buffer, 11, 28, 0);
+
+    sprintf((char*)buffer, "Y    %6.2f", yaw);
+    LCDdrawString(buffer, 11, 37, 0);
+
+    sprintf((char*)buffer, "P    %6.2f", pitch);
+    LCDdrawString(buffer, 11, 46, 0);
+
+    sprintf((char*)buffer, "R    %6.2f", roll);
+    LCDdrawString(buffer, 11, 54, 0);
+
+    sprintf((char*)buffer, "MODE     %c", (rwp_mode == 0) ? 'M' : 'A');
+    LCDdrawString(buffer, 10, 28, 68);
+
+    LCDdrawRect(66, 27, 1, 37, 1);
+
+    LCDupdateFromBuffer();
 
     HAL_Delay(100);
 
@@ -352,6 +487,96 @@ static void MX_SPI3_Init(void)
   /* USER CODE BEGIN SPI3_Init 2 */
 
   /* USER CODE END SPI3_Init 2 */
+
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 999;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 999;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+
+}
+
+/**
+  * @brief TIM5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM5_Init(void)
+{
+
+  /* USER CODE BEGIN TIM5_Init 0 */
+
+  /* USER CODE END TIM5_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM5_Init 1 */
+
+  /* USER CODE END TIM5_Init 1 */
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 99;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 999;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM5_Init 2 */
+
+  /* USER CODE END TIM5_Init 2 */
 
 }
 

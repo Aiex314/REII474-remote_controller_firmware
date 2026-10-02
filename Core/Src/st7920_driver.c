@@ -84,7 +84,7 @@ void sendDDRAMaddress(uint8_t row, uint8_t col) {
   HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);
 }
 
-void LCD_init() {
+void LCDinit() {
   // Wait for startup
   HAL_Delay(100); // gotta wait for the LCD to wake up
 
@@ -146,6 +146,8 @@ void LCDclearGraphics(uint8_t l) {
 }
 
 void LCDsendString(uint8_t* s, uint8_t len, uint8_t line, uint8_t col) {
+  if (curMode != 0 ) return;
+
   if (line > 3) return;
   if (col > 15) return;
 
