@@ -1,0 +1,229 @@
+/*
+ * st7920_driver.c
+ *
+ *  Created on: Oct 1, 2026
+ *      Author: hapro
+ */
+
+#include "st7920_driver.h"
+
+
+// Graphics or text mode
+static uint8_t curMode = 0;
+// Screen buffer
+static uint8_t LCDscreenBuffer[1024];
+static uint8_t LCDbufferDirty[1024];
+
+// Microsecond timer and SPI
+extern TIM_HandleTypeDef* lcd_us_timer;
+extern SPI_HandleTypeDef* lcd_spi;
+
+
+static void usDelay(uint16_t delay) {
+  __HAL_TIM_SET_COUNTER(lcd_us_timer, 0);
+  lcd_us_timer->Instance->CNT = 0;
+
+  while (lcd_us_timer->Instance->CNT < delay);
+}
+
+void sendLCDcmd(uint8_t cmd) {
+  uint8_t frame[3] = {0b11111000, 0, 0}; // Header[RW=0, RS=0] -> Write to command register
+  frame[1] =  cmd & 0xf0;
+  frame[2] = (cmd & 0x0f) << 4;
+
+
+  // Transmit the frame
+  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
+
+  HAL_SPI_Transmit(lcd_spi, frame, 3, 10);
+
+  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);
+}
+
+void sendLCDdata(uint8_t cmd) {
+  uint8_t frame[3] = {0b11111010, 0, 0}; // Header[RW=0, RS=1] -> Write data to LCD
+  frame[1] =  cmd & 0xf0;
+  frame[2] = (cmd << 4) & 0xf0;
+
+
+  // Transmit the frame
+  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
+
+  HAL_SPI_Transmit(lcd_spi, frame, 3, 10);
+
+  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);
+}
+
+void sendDDRAMaddress(uint8_t row, uint8_t col) {
+  uint8_t frame[6] = {0b11111000, 0, 0, 0b11111000, 0, 0}; // Header[RW=0, RS=0] -> Write cmd to LCD
+
+  frame[1] = (0x80 | row) & 0xf0;
+  frame[2] = (row & 0x0f) << 4;
+
+  frame[4] = (0x80 | col) & 0xf0;
+  frame[5] = (col & 0x0f) << 4;
+
+  // Transmit the frame
+  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
+
+  HAL_SPI_Transmit(lcd_spi, frame, 3, 10);
+
+  HAL_SPI_Transmit(lcd_spi, &frame[3], 3, 10);
+
+  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);
+
+  usDelay(100);
+}
+
+void LCD_init() {
+  // Wait for startup
+  HAL_Delay(100); // gotta wait for the LCD to wake up
+
+  // Set to 8-bit mode
+  sendLCDcmd(0x30);
+  HAL_Delay(1);
+  // do it again?
+  sendLCDcmd(0x30);
+  HAL_Delay(1);
+
+  // Clear screen
+  sendLCDcmd(0x01);
+  HAL_Delay(2);
+
+  // Setup cursor
+  sendLCDcmd(0x06); // Cursor moves right, no shifting
+  HAL_Delay(1);
+  sendLCDcmd(0x0C); // Display on, cursor on, no blink
+  HAL_Delay(1);
+  sendLCDcmd(0x02); // Cursor to home
+  HAL_Delay(1);
+}
+
+void LCDsetGraphicMode(uint8_t mode) {
+  if (curMode == mode || mode > 1) return;
+  curMode = mode;
+
+  // Go to graphic mode
+  if (curMode == 1) {
+    sendLCDcmd(0x30); // 8-bit, RE = 0
+    usDelay(100);
+    sendLCDcmd(0x34); // 8-bit, RE = 1, G = 0
+    usDelay(100);
+    sendLCDcmd(0x36); // 8-bit, RE = 1, G = 1
+    usDelay(100);
+  }
+  // Go to text mode
+  else {
+    sendLCDcmd(0x30); // 8-bit, RE = 0, G = 0
+    usDelay(100);
+  }
+}
+
+void LCDclearGraphics(uint8_t l) {
+  if (curMode == 0) return;
+
+  // Send 1024 zeroes to clear the screen....
+  for (uint8_t r=0; r<32; r++) {
+    // Set address per row
+    sendDDRAMaddress(r, 0);
+    usDelay(50);
+
+    // Send one row's worth of zeros
+    for (uint8_t c=0; c<32; c++) {
+      sendLCDdata(l);
+      usDelay(10);
+    }
+  }
+}
+
+void LCDsendString(uint8_t* s, uint8_t len, uint8_t line, uint8_t col) {
+  if (line > 3) return;
+  if (col > 15) return;
+
+  uint8_t newDDRAMaddress = 0x80 | (line << 4) | col;
+
+  // Set cursor.
+  sendLCDcmd(newDDRAMaddress);
+  usDelay(100);
+
+  // Send characters one after another.
+  for (uint8_t i=0; i<len; i++) {
+    sendLCDdata(s[i]);
+    usDelay(100);
+  }
+}
+
+
+
+void LCDclearBuffer(uint8_t c) {
+  memset(LCDscreenBuffer, c, 1024);
+  memset(LCDbufferDirty, 0x01, 1024);
+}
+
+void LCDupdateFromBuffer() {
+  if (curMode == 0) return;
+
+  for (uint8_t r=0; r<32; r++) {
+    // Set address per row
+    sendDDRAMaddress(r, 0);
+    usDelay(50);
+
+    // Send one row's worth of zeros
+    for (uint8_t c=0; c<32; c++) {
+
+
+
+      uint16_t i = r*16 + c%16;
+      if (c >= 16) i += 512;
+
+      if (LCDbufferDirty[i] == 0) continue;
+
+      LCDbufferDirty[i] = 0;
+
+      sendLCDdata(LCDscreenBuffer[i] & 0b11111111);
+      usDelay(10);
+    }
+  }
+}
+
+// Not the strangest code I've written.
+// These generate the left and right column of pixels
+#define LEFT_BYTE(x) (1<<(8-(unsigned short)x%8))-1
+#define RIGHT_BYTE(x) ((1<<((unsigned short)x%8))-1)<<(8-x)
+
+void LCDdrawRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t col) {
+  uint8_t startIndexX = x/8, endIndexX = (w+x)/8;
+  uint8_t startIndexY = y,   endIndexY = y+h;
+
+  uint8_t startParity = x%8, endParity = (w+x)%8;
+
+  uint8_t leftByte =  LEFT_BYTE(startParity);
+  uint8_t rightByte = RIGHT_BYTE(endParity);
+  if (startIndexX == endIndexX) leftByte &= rightByte;
+
+  for (uint8_t i_x = startIndexX; i_x <= endIndexX; i_x++) {
+    for (uint8_t i_y = startIndexY; i_y < endIndexY; i_y++) {
+      if (i_x == endIndexX && endParity == 0) continue;
+
+      uint16_t index = i_y*16 + i_x;
+      if (col != 0) {
+        if (i_x == startIndexX)
+          LCDscreenBuffer[index] |= leftByte;
+        else if (i_x == endIndexX && endParity != 0)
+          LCDscreenBuffer[index] |= rightByte;
+        else
+          LCDscreenBuffer[index] = 0xff;
+      }
+      else {
+        if (i_x == startIndexX)
+          LCDscreenBuffer[index] &= ~leftByte;
+        else if (i_x == endIndexX && endParity != 0)
+          LCDscreenBuffer[index] &= ~rightByte;
+        else
+          LCDscreenBuffer[index] = 0x00;
+      }
+
+      LCDbufferDirty[index] = 0x01;
+    }
+  }
+}
