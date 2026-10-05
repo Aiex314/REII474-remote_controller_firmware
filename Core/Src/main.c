@@ -108,7 +108,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
 
       // Convert the raw values into an RPM
       int16_t pulses = rx_payload[2] * 0x100 + rx_payload[3];
-      rpm = (6000.0f / 512.0f) * (float)pulses;
+      rpm = (200.0f * 60.0f / 1024.0f) * (float)pulses;
 
       // Convert the raw values into yaw, pitch and roll
       uint8_t* pitch_bytes = (uint8_t*)(&pitch);
@@ -128,11 +128,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
       yaw_bytes[1] = rx_payload[13];
       yaw_bytes[2] = rx_payload[14];
       yaw_bytes[3] = rx_payload[15];
-
-//      char out_buf[32];
-//      sprintf(out_buf, "Pitch: %.3f\r\n", pitch);
-//      uint8_t len = strlen(out_buf);
-//      HAL_UART_Transmit(&huart6, (uint8_t*)out_buf, len, 10);
 
       // Clear TX DS interrupt
       writeNRF24register(N24_STATUS, status | 0b00100000);
