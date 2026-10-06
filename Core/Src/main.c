@@ -25,6 +25,8 @@
 
 #include "st7920_driver.h"
 #include "nRF24_driver.h"
+
+#include "message_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -78,7 +80,9 @@ static void MX_TIM5_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 uint16_t POT_result = 2048;
-uint8_t rwp_mode = 1;
+
+RWP_MODE rwp_mode = RWP_MODE_HALTED;
+RWP_DATA_KIND rwp_data = SENSOR_DATA;
 
 float rpm = 0.0, pitch, roll, yaw;
 
@@ -88,46 +92,21 @@ uint8_t button_prev_state[4]  = {0};
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
   // Operate the nRF24 at 100Hz
   if (htim == &htim4) {
-    // Payload buffers
-    uint8_t tx_payload[32];
-    uint8_t rx_payload[32];
-
-    // Put the potentiometer reading in the transmit buffer
-    int16_t potentiometer_value = POT_result-2048;
-    tx_payload[0] = (potentiometer_value & 0xff00) >> 8;
-    tx_payload[1] = potentiometer_value & 0x00ff;
-    tx_payload[2] = rwp_mode;
-
-
-
     // If the nRF24 received a response packet, get and parse it.
     uint8_t status = readNRF24status();
     if ((status & 0b00100000) != 0) {
+      RWP_MESSAGE_FRAME rwp_message;
+
       // Retrieve acknowledgement payload
-      readNRF24payload(rx_payload, 16);
+      readNRF24payload(rwp_message.bytes, 32);
 
       // Convert the raw values into an RPM
-      int16_t pulses = rx_payload[2] * 0x100 + rx_payload[3];
+      int16_t pulses = rwp_message.sensor_data.rotary_encoder;
       rpm = (200.0f * 60.0f / 1024.0f) * (float)pulses;
 
-      // Convert the raw values into yaw, pitch and roll
-      uint8_t* pitch_bytes = (uint8_t*)(&pitch);
-      pitch_bytes[0] = rx_payload[4];
-      pitch_bytes[1] = rx_payload[5];
-      pitch_bytes[2] = rx_payload[6];
-      pitch_bytes[3] = rx_payload[7];
-
-      uint8_t* roll_bytes = (uint8_t*)(&roll);
-      roll_bytes[0] = rx_payload[8];
-      roll_bytes[1] = rx_payload[9];
-      roll_bytes[2] = rx_payload[10];
-      roll_bytes[3] = rx_payload[11];
-
-      uint8_t* yaw_bytes = (uint8_t*)(&yaw);
-      yaw_bytes[0] = rx_payload[12];
-      yaw_bytes[1] = rx_payload[13];
-      yaw_bytes[2] = rx_payload[14];
-      yaw_bytes[3] = rx_payload[15];
+      pitch = rwp_message.sensor_data.pitch;
+      roll  = rwp_message.sensor_data.roll;
+      yaw   = rwp_message.sensor_data.yaw;
 
       // Clear TX DS interrupt
       writeNRF24register(N24_STATUS, status | 0b00100000);
@@ -138,8 +117,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
       writeNRF24register(N24_STATUS, status | 0b00010000);
     }
 
-    // Always send a new payload
-    sendNRF24payload(tx_payload, 8);
+    // Set up a message frame
+    RMT_MESSAGE_FRAME rmt_message;
+    memset(rmt_message.bytes, 0x00, 16);
+
+    // Put the potentiometer reading in the transmit buffer
+    rmt_message.control_msg.req_mode = rwp_mode;
+    rmt_message.control_msg.req_data_type = rwp_data;
+    rmt_message.control_msg.pot_value = POT_result-2048;
+
+    // Send the message
+    sendNRF24payload(rmt_message.bytes, 16);
   }
   // Sample and debounce the buttons at 1kHz
   else if (htim == &htim5) {
@@ -172,6 +160,41 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
   }
 }
 
+
+void btn1() {
+  if (rwp_mode == RWP_MODE_MANUAL) rwp_mode = RWP_MODE_AUTO;
+  else rwp_mode = RWP_MODE_MANUAL;
+
+  return;
+}
+
+void btn2() {
+  return;
+}
+
+void btn3() {
+  return;
+}
+
+void btn4() {
+  return;
+}
+
+void btnHandler() {
+  static uint8_t prev_state[4] = {0, 0, 0, 0};
+  void (*btnFn[4])() = {&btn1, &btn2, &btn3, &btn4};
+
+  for (int i=0; i<4; i++) {
+    if (prev_state[i] == 0 && button_state[i] == 1) {
+      prev_state[i] = 1;
+
+      btnFn[i]();
+    }
+    else if (button_state[i] == 0) {
+      prev_state[i] = 0;
+    }
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -243,19 +266,13 @@ int main(void)
 
   uint8_t buffer[32];
 
-  uint8_t edge = 0;
   while (1)
   {
-    if (edge == 0 && button_state[0] == 1) {
-      edge = 1;
-      rwp_mode = 1 - rwp_mode;
-    }
-    else if (button_state[0] == 0)
-      edge = 0;
+    btnHandler();
 
+    // Print the button statusses
     sprintf((char*)buffer, "BTNS [%.1d%.1d%.1d%.1d]", button_state[0], button_state[1], button_state[2], button_state[3]);
     LCDdrawEmphString(buffer, 11, 0, 0);
-
 
     // Get a reading from the potentiometer
     HAL_ADC_Start(&hadc1);
@@ -266,7 +283,6 @@ int main(void)
     sprintf((char*)buffer, "POT  %1.02fV", voltage);
     LCDdrawString(buffer, 10, 10, 0);
     LCDupdateFromBuffer();
-
 
     // Display the received data
     sprintf((char*)buffer, "RPM   %5d", (int)rpm);
@@ -281,11 +297,13 @@ int main(void)
     sprintf((char*)buffer, "R    %6.2f", roll);
     LCDdrawString(buffer, 11, 54, 0);
 
-    sprintf((char*)buffer, "MODE     %c", (rwp_mode == 0) ? 'M' : 'A');
+    sprintf((char*)buffer, "MODE     %c", (rwp_mode == RWP_MODE_MANUAL) ? 'M' : 'A');
     LCDdrawString(buffer, 10, 28, 68);
 
+    // Nice divider
     LCDdrawRect(66, 27, 1, 37, 1);
 
+    // Update screen.
     LCDupdateFromBuffer();
 
     HAL_Delay(100);
