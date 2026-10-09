@@ -27,6 +27,8 @@
 #include "nRF24_driver.h"
 
 #include "message_protocol.h"
+
+#include "command_processor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,6 +61,8 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 TIM_HandleTypeDef* lcd_us_timer = &htim11;
 
+UART_HandleTypeDef* huart_dbg = &huart1;
+
 SPI_HandleTypeDef* nrf_spi = &hspi1;
 SPI_HandleTypeDef* lcd_spi = &hspi3;
 /* USER CODE END PV */
@@ -84,13 +88,17 @@ uint16_t POT_result = 2048;
 RWP_MODE rwp_mode = RWP_MODE_HALTED;
 RWP_DATA_KIND rwp_data = SENSOR_DATA;
 
+uint8_t control_mode;
 float rpm = 0.0, pitch, roll, yaw;
+float v_a, v_b, v_c, ctrl_value;
 
 uint8_t button_state[4] = {0};
-uint8_t button_prev_state[4]  = {0};
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
+  static uint32_t tick_count = 0;
+
   // Operate the nRF24 at 100Hz
+  // Also process UART at 100Hz
   if (htim == &htim4) {
     // If the nRF24 received a response packet, get and parse it.
     uint8_t status = readNRF24status();
@@ -100,13 +108,41 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
       // Retrieve acknowledgement payload
       readNRF24payload(rwp_message.bytes, 32);
 
-      // Convert the raw values into an RPM
-      int16_t pulses = rwp_message.sensor_data.rotary_encoder;
-      rpm = (200.0f * 60.0f / 1024.0f) * (float)pulses;
+      if (rwp_message.control_data.data_type == SENSOR_DATA) {
+        // Convert the raw values into an RPM
+        int16_t pulses = rwp_message.sensor_data.rotary_encoder;
 
-      pitch = rwp_message.sensor_data.pitch;
-      roll  = rwp_message.sensor_data.roll;
-      yaw   = rwp_message.sensor_data.yaw;
+        rpm = (200.0f * 60.0f / 1024.0f) * (float)pulses;
+        pitch = rwp_message.sensor_data.pitch;
+        roll  = rwp_message.sensor_data.roll;
+        yaw   = rwp_message.sensor_data.yaw;
+
+        if (getDebug() == 1) {
+          char buffer[256];
+          float t = (float)tick_count/100.0;
+          sprintf(buffer, "%6.2f, %8.5f, %8.5f, %8.5f, %5.1f\r\n", t, yaw, pitch, roll, rpm);
+
+          uint8_t len = strlen(buffer);
+
+          putString((uint8_t*)buffer, len);
+        }
+      }
+      else if (rwp_message.control_data.data_type == CONTROL_DATA) {
+        v_a = rwp_message.control_data.v_a;
+        v_b = rwp_message.control_data.v_b;
+        v_c = rwp_message.control_data.v_c;
+        ctrl_value = rwp_message.control_data.ctrl_value;
+
+        if (getDebug() == 1) {
+          char buffer[256];
+          float t = (float)tick_count/100.0;
+          sprintf(buffer, "%6.2f, %8.5f, %8.5f, %8.5f, %8.5f\r\n", t, v_a, v_b, v_c, ctrl_value);
+
+          uint8_t len = strlen(buffer);
+
+          putString((uint8_t*)buffer, len);
+        }
+      }
 
       // Clear TX DS interrupt
       writeNRF24register(N24_STATUS, status | 0b00100000);
@@ -128,6 +164,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
 
     // Send the message
     sendNRF24payload(rmt_message.bytes, 16);
+
+
+    processUART();
+
+    ++tick_count;
   }
   // Sample and debounce the buttons at 1kHz
   else if (htim == &htim5) {
@@ -147,8 +188,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
     static uint8_t button_counters[4];
 
     for (int i=0; i<4; i++) {
-      button_prev_state[i] = button_state[i];
-
       if (cur_states[i] == GPIO_PIN_SET) button_counters[i] = 0;
 
       if (button_counters[i] >= 5) button_state[i] = 1;
@@ -169,10 +208,13 @@ void btn1() {
 }
 
 void btn2() {
+  rwp_mode = RWP_MODE_HALTED;
   return;
 }
 
 void btn3() {
+  if (rwp_data == SENSOR_DATA) rwp_data = CONTROL_DATA;
+  else rwp_data = SENSOR_DATA;
   return;
 }
 
@@ -268,8 +310,6 @@ int main(void)
 
   while (1)
   {
-    btnHandler();
-
     // Print the button statusses
     sprintf((char*)buffer, "BTNS [%.1d%.1d%.1d%.1d]", button_state[0], button_state[1], button_state[2], button_state[3]);
     LCDdrawEmphString(buffer, 11, 0, 0);
@@ -284,20 +324,40 @@ int main(void)
     LCDdrawString(buffer, 10, 10, 0);
     LCDupdateFromBuffer();
 
-    // Display the received data
-    sprintf((char*)buffer, "RPM   %5d", (int)rpm);
-    LCDdrawString(buffer, 11, 28, 0);
 
-    sprintf((char*)buffer, "Y    %6.2f", yaw);
-    LCDdrawString(buffer, 11, 37, 0);
+    if (rwp_data == SENSOR_DATA) {
+      // Display the received data
+      sprintf((char*)buffer, "RPM   %5d", (int)rpm);
+      LCDdrawString(buffer, 11, 28, 0);
 
-    sprintf((char*)buffer, "P    %6.2f", pitch);
-    LCDdrawString(buffer, 11, 46, 0);
+      sprintf((char*)buffer, "Y    %6.2f", yaw);
+      LCDdrawString(buffer, 11, 37, 0);
 
-    sprintf((char*)buffer, "R    %6.2f", roll);
-    LCDdrawString(buffer, 11, 54, 0);
+      sprintf((char*)buffer, "P    %6.2f", pitch);
+      LCDdrawString(buffer, 11, 46, 0);
 
-    sprintf((char*)buffer, "MODE     %c", (rwp_mode == RWP_MODE_MANUAL) ? 'M' : 'A');
+      sprintf((char*)buffer, "R    %6.2f", roll);
+      LCDdrawString(buffer, 11, 54, 0);
+    }
+    else {
+      sprintf((char*)buffer, "CVAL %6.3f", ctrl_value);
+      LCDdrawString(buffer, 11, 28, 0);
+
+      sprintf((char*)buffer, "A   %7.4f", v_a);
+      LCDdrawString(buffer, 11, 37, 0);
+
+      sprintf((char*)buffer, "B   %7.4f", v_b);
+      LCDdrawString(buffer, 11, 46, 0);
+
+      sprintf((char*)buffer, "C   %f", v_c);
+      LCDdrawString(buffer, 11, 54, 0);
+    }
+
+    char* s = "????";
+    if (rwp_mode == RWP_MODE_MANUAL) s = "MANL";
+    else if (rwp_mode == RWP_MODE_AUTO) s = "AUTO";
+    else if (rwp_mode == RWP_MODE_HALTED) s = "HALT";
+    sprintf((char*)buffer, "MODE  %s", s);
     LCDdrawString(buffer, 10, 28, 68);
 
     // Nice divider
@@ -306,7 +366,12 @@ int main(void)
     // Update screen.
     LCDupdateFromBuffer();
 
-    HAL_Delay(100);
+    // Hack to run the button handler at 100Hz, and the screen at 10Hz
+    for (int i=0; i<10; i++) {
+      HAL_Delay(10);
+      btnHandler();
+    }
+
 
 
 	// Cool demo :)
