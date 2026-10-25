@@ -90,7 +90,7 @@ RWP_DATA_KIND rwp_data = SENSOR_DATA;
 
 uint8_t control_mode;
 float rpm = 0.0, pitch, roll, yaw;
-float v_a, v_b, v_c, ctrl_value;
+float v_a, v_b, v_c, v_d, v_e, v_f, ctrl_value;
 
 uint8_t button_state[4] = {0};
 
@@ -109,10 +109,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
       readNRF24payload(rwp_message.bytes, 32);
 
       if (rwp_message.control_data.data_type == SENSOR_DATA) {
-        // Convert the raw values into an RPM
-        int16_t pulses = rwp_message.sensor_data.rotary_encoder;
-
-        rpm = (200.0f * 60.0f / 1024.0f) * (float)pulses;
+        rpm   = rwp_message.sensor_data.RPM;
         pitch = rwp_message.sensor_data.pitch;
         roll  = rwp_message.sensor_data.roll;
         yaw   = rwp_message.sensor_data.yaw;
@@ -131,12 +128,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
         v_a = rwp_message.control_data.v_a;
         v_b = rwp_message.control_data.v_b;
         v_c = rwp_message.control_data.v_c;
+        v_d = rwp_message.control_data.v_d;
+        v_e = rwp_message.control_data.v_e;
+        v_f = rwp_message.control_data.v_f;
         ctrl_value = rwp_message.control_data.ctrl_value;
 
         if (getDebug() == 1) {
           char buffer[256];
           float t = (float)tick_count/100.0;
-          sprintf(buffer, "%6.2f, %8.5f, %8.5f, %8.5f, %8.5f\r\n", t, v_a, v_b, v_c, ctrl_value);
+          sprintf(buffer, "%6.2f, %8.5f, %8.5f, %8.5f, %8.5f, %8.5f, %8.5f, %8.5f\r\n", t, v_a, v_b, v_c, v_d, v_e, v_f, ctrl_value);
 
           uint8_t len = strlen(buffer);
 
@@ -171,6 +171,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
     ++tick_count;
   }
   // Sample and debounce the buttons at 1kHz
+  // Also sample and filter the potentiometer at 1kHz
   else if (htim == &htim5) {
     // Sample the buttons
     GPIO_PinState btn1 = HAL_GPIO_ReadPin(BTN_2_GPIO_Port, BTN_2_Pin); // Yes, the numbers disagree
@@ -186,9 +187,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
     };
 
     static uint8_t button_counters[4];
+    uint8_t num_pressed = 0;
+
 
     for (int i=0; i<4; i++) {
       if (cur_states[i] == GPIO_PIN_SET) button_counters[i] = 0;
+      else ++num_pressed;
 
       if (button_counters[i] >= 5) button_state[i] = 1;
       else {
@@ -196,35 +200,107 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
         ++button_counters[i];
       }
     }
+
+    // Get a reading from the potentiometer
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 1);
+    uint16_t result = HAL_ADC_GetValue(&hadc1);
+    // Filter the result
+    POT_result = 0.6*POT_result + 0.4*result;
+
+    // Press all four buttons with knob all the way
+    // to the right to get into debug mode
+    if (num_pressed == 4 && POT_result < 10)
+      setDebug(1);
   }
 }
 
+typedef enum {
+  MAIN_MENU,
+  MANUAL_MENU,
+  AUTO_MENU,
+  CALIBRATION_MENU,
+  HELP_MENU,
+  DEBUG_MENU,
+  EASTER_EGG_MENU,
+  ERROR_ACKNOWLEDGE,
+  CONNECTION_PENDING
+} rmt_mode;
 
-void btn1() {
-  if (rwp_mode == RWP_MODE_MANUAL) rwp_mode = RWP_MODE_AUTO;
-  else rwp_mode = RWP_MODE_MANUAL;
+rmt_mode cur_rmt_mode  = DEBUG_MENU;
+rmt_mode prev_rmt_mode = DEBUG_MENU;
 
-  return;
+int8_t menu_sel_index = 0;
+uint16_t frame_counter = 0;
+
+void btnSelect() {
+  switch (cur_rmt_mode) {
+    case DEBUG_MENU:
+      if (rwp_mode == RWP_MODE_MANUAL) rwp_mode = RWP_MODE_AUTO;
+      else rwp_mode = RWP_MODE_MANUAL;
+      break;
+    case ERROR_ACKNOWLEDGE:
+      cur_rmt_mode = MAIN_MENU;
+      break;
+    case MAIN_MENU: {
+      rmt_mode entry_mode[] = {
+        MANUAL_MENU,
+        AUTO_MENU,
+        CALIBRATION_MENU,
+        HELP_MENU,
+        DEBUG_MENU
+      };
+
+      cur_rmt_mode = entry_mode[menu_sel_index];
+    }
+    default:
+      break;
+  }
 }
 
-void btn2() {
-  rwp_mode = RWP_MODE_HALTED;
-  return;
+void btnBack() {
+  switch (cur_rmt_mode) {
+    case DEBUG_MENU:
+      cur_rmt_mode = MAIN_MENU;
+      rwp_mode = RWP_MODE_HALTED;
+      break;
+    default:
+      cur_rmt_mode = MAIN_MENU;
+      rwp_mode = RWP_MODE_HALTED;
+      break;
+  }
 }
 
-void btn3() {
-  if (rwp_data == SENSOR_DATA) rwp_data = CONTROL_DATA;
-  else rwp_data = SENSOR_DATA;
-  return;
+void btnUp() {
+  switch (cur_rmt_mode) {
+    case DEBUG_MENU:
+      if (rwp_mode == RWP_MODE_HALTED) rwp_mode = RWP_MODE_LOCK;
+      else if (rwp_mode == RWP_MODE_LOCK) rwp_mode = RWP_MODE_CALIBRATION;
+      else rwp_mode = RWP_MODE_HALTED;
+      break;
+    default:
+      --menu_sel_index;
+      break;
+  }
 }
 
-void btn4() {
+void btnDown() {
+  switch (cur_rmt_mode) {
+    case DEBUG_MENU:
+      if (rwp_mode != RWP_MODE_CALIBRATION) rwp_mode = RWP_MODE_CALIBRATION;
+      break;
+    default:
+      ++menu_sel_index;
+      break;
+  }
+
   return;
 }
 
 void btnHandler() {
+  // Buttons ordered from top left to bottom right
   static uint8_t prev_state[4] = {0, 0, 0, 0};
-  void (*btnFn[4])() = {&btn1, &btn2, &btn3, &btn4};
+  void (*btnFn[4])() = {&btnSelect, &btnUp, &btnBack, &btnDown};
 
   for (int i=0; i<4; i++) {
     if (prev_state[i] == 0 && button_state[i] == 1) {
@@ -236,6 +312,154 @@ void btnHandler() {
       prev_state[i] = 0;
     }
   }
+}
+
+
+void updateDisplay() {
+  // General purpose string buffer
+  uint8_t buffer[32];
+
+  // When switching remote modes, completely clear the buffer
+  static rmt_mode last_rmt_mode = DEBUG_MENU;
+  uint8_t new_menu = (last_rmt_mode != cur_rmt_mode);
+  if (new_menu) LCDclearBuffer(0x00);
+  last_rmt_mode = cur_rmt_mode;
+
+  switch (cur_rmt_mode) {
+  case DEBUG_MENU:
+    // Print the button statusses
+    sprintf((char*)buffer, "BTNS [%.1d%.1d%.1d%.1d]", button_state[0], button_state[1], button_state[2], button_state[3]);
+    LCDdrawEmphString(buffer, 11, 0, 0);
+
+    // Display the last potentiometer reading
+    float voltage = 3.3/4096.0 * POT_result;
+    sprintf((char*)buffer, "POT  %1.02fV", voltage);
+    LCDdrawString(buffer, 10, 10, 0);
+
+
+    if (rwp_data == SENSOR_DATA) {
+      // Display the received data
+      sprintf((char*)buffer, "RPM   %5d", (int)rpm);
+      LCDdrawString(buffer, 11, 28, 0);
+
+      sprintf((char*)buffer, "Y    %6.2f", yaw);
+      LCDdrawString(buffer, 11, 37, 0);
+
+      sprintf((char*)buffer, "P    %6.2f", pitch);
+      LCDdrawString(buffer, 11, 46, 0);
+
+      sprintf((char*)buffer, "R    %6.2f", roll);
+      LCDdrawString(buffer, 11, 54, 0);
+    }
+    else {
+      sprintf((char*)buffer, "CVAL %6.3f", ctrl_value);
+      LCDdrawString(buffer, 11, 28, 0);
+
+      sprintf((char*)buffer, "a_p %7.4f", v_a);
+      LCDdrawString(buffer, 11, 37, 0);
+
+      sprintf((char*)buffer, "w_p %7.4f", v_b);
+      LCDdrawString(buffer, 11, 46, 0);
+
+      sprintf((char*)buffer, "w_f %7.4f", v_c);
+      LCDdrawString(buffer, 11, 54, 0);
+
+      sprintf((char*)buffer, "PEp %6.3f", v_d);
+      LCDdrawString(buffer, 10, 37, 68);
+
+      sprintf((char*)buffer, "KEp %6.3f", v_e);
+      LCDdrawString(buffer, 10, 46, 68);
+
+      sprintf((char*)buffer, "KEf %6.3f", v_f);
+      LCDdrawString(buffer, 10, 54, 68);
+    }
+
+    char* s = "????";
+    if (rwp_mode == RWP_MODE_MANUAL) s = "MANL";
+    else if (rwp_mode == RWP_MODE_AUTO) s = "AUTO";
+    else if (rwp_mode == RWP_MODE_HALTED) s = "HALT";
+    else if (rwp_mode == RWP_MODE_CALIBRATION) s = "CALI";
+    else if (rwp_mode == RWP_MODE_LOCK) s = "LOCK";
+    sprintf((char*)buffer, "MODE  %s", s);
+    LCDdrawString(buffer, 10, 28, 68);
+
+    // Nice divider
+    LCDdrawRect(66, 27, 1, 37, 1);
+    break;
+  case MAIN_MENU:
+    // Header
+    LCDdrawString((uint8_t*)"Menu", 4, 1, 51);
+    LCDdrawRect(1, 9, 126, 1, 1);
+
+    // Print entries
+    char* menu_entries[] = {
+      "Manual mode",
+      "Automatic mode",
+      "Calibration",
+      "Help",
+      "Debug",
+      "Easter eggs :)"
+    };
+
+    // Set menu length based on what has been unlocked...
+    uint8_t l = 4;
+    if (getDebug()) l = 6;
+
+    menu_sel_index = (l+menu_sel_index) % l;
+
+    for (uint8_t i=0; i<l; i++) {
+      if (i == menu_sel_index)
+        LCDdrawEmphString((uint8_t*)menu_entries[i], strlen(menu_entries[i]), 10*i + 11, 1);
+      else
+        LCDdrawStringDeemph((uint8_t*)menu_entries[i], strlen(menu_entries[i]), 10*i + 11, 1);
+    }
+    break;
+  case MANUAL_MENU: {
+    // Check whether potentiometer is centered when entering menu
+    static uint8_t pot_check = 0;
+    if (new_menu) {
+      pot_check = 0;
+      rwp_mode = RWP_MODE_HALTED;
+    }
+    if (pot_check == 0) {
+      if (POT_result > 2028 && POT_result < 2068) {
+        pot_check = 1;
+        rwp_mode = RWP_MODE_MANUAL;
+        LCDclearBuffer(0x00);
+      }
+      else {
+        // Print message while potentiometer is not centered
+        LCDdrawString((uint8_t*)"Set knob to 0", 13, 11, 1);
+        break;
+      }
+    }
+    }
+    // Header
+    LCDdrawString((uint8_t*)"Manual mode", 11, 1, 31);
+    LCDdrawRect(1, 9, 126, 1, 1);
+
+    // Print the current control value
+    float ctrl_val = (POT_result-2048)/2048.0;
+    sprintf((char*)buffer, "Knob value:% 2.03f", ctrl_val);
+    LCDdrawString(buffer, 18, 11, 1);
+
+    break;
+  case AUTO_MENU:
+    // Header
+    LCDdrawString((uint8_t*)"Auto mode", 9, 1, 37);
+    LCDdrawRect(1, 9, 126, 1, 1);
+
+    break;
+  default:
+    LCDdrawString((uint8_t*)"Bad menu ID", 11, 1, 1);
+    break;
+  }
+
+  // Update screen.
+  LCDupdateFromBuffer();
+
+  // Update frame counter, for anything that wants it
+  ++frame_counter;
 }
 
 /* USER CODE END 0 */
@@ -305,66 +529,9 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-  uint8_t buffer[32];
-
   while (1)
   {
-    // Print the button statusses
-    sprintf((char*)buffer, "BTNS [%.1d%.1d%.1d%.1d]", button_state[0], button_state[1], button_state[2], button_state[3]);
-    LCDdrawEmphString(buffer, 11, 0, 0);
-
-    // Get a reading from the potentiometer
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 1);
-    POT_result = HAL_ADC_GetValue(&hadc1);
-    float voltage = 3.3/4096.0 * POT_result;
-    // And display it
-    sprintf((char*)buffer, "POT  %1.02fV", voltage);
-    LCDdrawString(buffer, 10, 10, 0);
-    LCDupdateFromBuffer();
-
-
-    if (rwp_data == SENSOR_DATA) {
-      // Display the received data
-      sprintf((char*)buffer, "RPM   %5d", (int)rpm);
-      LCDdrawString(buffer, 11, 28, 0);
-
-      sprintf((char*)buffer, "Y    %6.2f", yaw);
-      LCDdrawString(buffer, 11, 37, 0);
-
-      sprintf((char*)buffer, "P    %6.2f", pitch);
-      LCDdrawString(buffer, 11, 46, 0);
-
-      sprintf((char*)buffer, "R    %6.2f", roll);
-      LCDdrawString(buffer, 11, 54, 0);
-    }
-    else {
-      sprintf((char*)buffer, "CVAL %6.3f", ctrl_value);
-      LCDdrawString(buffer, 11, 28, 0);
-
-      sprintf((char*)buffer, "A   %7.4f", v_a);
-      LCDdrawString(buffer, 11, 37, 0);
-
-      sprintf((char*)buffer, "B   %7.4f", v_b);
-      LCDdrawString(buffer, 11, 46, 0);
-
-      sprintf((char*)buffer, "C   %f", v_c);
-      LCDdrawString(buffer, 11, 54, 0);
-    }
-
-    char* s = "????";
-    if (rwp_mode == RWP_MODE_MANUAL) s = "MANL";
-    else if (rwp_mode == RWP_MODE_AUTO) s = "AUTO";
-    else if (rwp_mode == RWP_MODE_HALTED) s = "HALT";
-    sprintf((char*)buffer, "MODE  %s", s);
-    LCDdrawString(buffer, 10, 28, 68);
-
-    // Nice divider
-    LCDdrawRect(66, 27, 1, 37, 1);
-
-    // Update screen.
-    LCDupdateFromBuffer();
+    updateDisplay();
 
     // Hack to run the button handler at 100Hz, and the screen at 10Hz
     for (int i=0; i<10; i++) {
@@ -636,7 +803,7 @@ static void MX_TIM5_Init(void)
   htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim5.Init.Period = 999;
   htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
   {
     Error_Handler();

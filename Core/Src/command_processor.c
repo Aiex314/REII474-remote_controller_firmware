@@ -174,3 +174,7 @@ void processUART() {
 uint8_t getDebug() {
   return (debug_enabled != 0) ? 1 : 0;
 }
+
+void setDebug(uint8_t d) {
+  debug_enabled = (d == 0) ? 0 : 1;
+}

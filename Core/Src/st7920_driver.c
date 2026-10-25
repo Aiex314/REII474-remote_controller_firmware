@@ -322,7 +322,12 @@ void LCDdrawString(uint8_t* s, uint8_t len, uint8_t row, uint8_t col) {
 }
 
 void LCDdrawEmphString(uint8_t* s, uint8_t len, uint8_t row, uint8_t col) {
-  LCDdrawRect(col, row, 6*len, 9, 0);
+  LCDdrawRect(col, row, 6*len+1, 9, 0);
   LCDdrawString(s, len, row+1, col+1);
-  LCDxorRect(col, row, 6*len, 9);
+  LCDxorRect(col, row, 6*len+1, 9);
+}
+
+void LCDdrawStringDeemph(uint8_t* s, uint8_t len, uint8_t row, uint8_t col) {
+  LCDdrawRect(col, row, 6*len+1, 9, 0);
+  LCDdrawString(s, len, row+1, col+1);
 }

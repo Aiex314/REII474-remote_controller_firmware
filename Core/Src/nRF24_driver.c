@@ -144,7 +144,7 @@ void NRF24init() {
   writeNRF24register(N24_CONFIG,    0b01111000); // Mask all interrupts, enable 1B CRC, keep power down, act as PTX
   readNRF24register(N24_CONFIG);
 
-  // Setup extra features. TODO: The toggleNRF24extraFeatures function doesn't seem to have an effect... find out why?
+  // Setup extra features.
   toggleNRF24extraFeatures();
   writeNRF24register(N24_FEATURE,   0b00000111); // Enable all acknowledge payload features
   writeNRF24register(N24_DYNPD,     0b00000001); // Enable dynamic payload in pipe 0

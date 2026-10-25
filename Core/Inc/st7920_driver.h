@@ -38,5 +38,6 @@ void LCDdrawBootScreen();
 void LCDdrawChar(uint8_t c, uint8_t row, uint8_t col);
 void LCDdrawString(uint8_t* s, uint8_t len, uint8_t row, uint8_t col);
 void LCDdrawEmphString(uint8_t* s, uint8_t len, uint8_t row, uint8_t col);
+void LCDdrawStringDeemph(uint8_t* s, uint8_t len, uint8_t row, uint8_t col);
 
 #endif /* INC_ST7920_DRIVER_H_ */
