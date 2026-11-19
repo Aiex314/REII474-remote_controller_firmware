@@ -19,6 +19,7 @@ extern UART_HandleTypeDef* huart_dbg;
 void processUART();
 
 uint8_t getDebug();
+void setDebug(uint8_t);
 
 uint8_t putString(uint8_t* s, uint8_t l);
 

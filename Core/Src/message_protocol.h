@@ -8,7 +8,7 @@
 #ifndef SRC_MESSAGE_PROTOCOL_H_
 #define SRC_MESSAGE_PROTOCOL_H_
 
-
+#include <stdint.h>
 
 typedef enum {
   RWP_MODE_NO_COMMS,
@@ -16,10 +16,21 @@ typedef enum {
   RWP_MODE_MANUAL,
   RWP_MODE_AUTO,
   RWP_MODE_LOCK,
-  RWP_MODE_TRICKS,
+  RWP_MODE_DEMO,
   RWP_MODE_CALIBRATION,
   RWP_MODE_DEBUG
 } RWP_MODE;
+
+typedef enum {
+  RWP_CTRL_NONE,
+  RWP_CTRL_SWINGUP,
+  RWP_CTRL_LINEAR,
+  RWP_CTRL_SLOWDOWN,
+  RWP_CTRL_FALLR,
+  RWP_CTRL_FALLL,
+  RWP_CTRL_CATCH,
+  RWP_CTRL_SWINGDOWN
+} RWP_CTRL_MODE;
 
 typedef enum {
   SENSOR_DATA,
@@ -31,7 +42,8 @@ typedef enum {
 typedef struct {
   uint8_t cur_mode;           // + 1B     = 1B
   RWP_DATA_KIND data_type;    // + 1B     = 2B
-  uint8_t _pad1[2];           // + 2B     = 4B
+  RWP_CTRL_MODE ctrl_mode;    // + 1B     = 3B
+  uint8_t _pad1[1];           // + 1B     = 4B
   float yaw, roll, pitch, RPM;// + 4B * 4 = 20B
   uint8_t _pad2[12];          // + 12B    = 32B
 } RWP_SENSOR_DATA;
@@ -39,7 +51,7 @@ typedef struct {
 typedef struct {
   uint8_t cur_mode;           // +1B     = 1B
   RWP_DATA_KIND data_type;    // +1B     = 2B
-  uint8_t control_mode;       // +1B     = 3B
+  RWP_CTRL_MODE ctrl_mode;    // +1B     = 3B
   uint8_t _pad1[1];           // +1B     = 4B
   float v_a, v_b, v_c;        // +4B * 3 = 16B
   float v_d, v_e, v_f;        // +4B * 3 = 28B

@@ -32,7 +32,7 @@ void LCDupdateFromBuffer();
 void LCDdrawRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t col);
 void LCDxorRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h);
 
-void LCDdrawBitmap(const uint8_t* bitmap, uint16_t len);
+void LCDdrawBitmap(const uint8_t* bitmap, uint8_t y, uint8_t x, uint8_t w, uint8_t h);
 void LCDdrawBootScreen();
 
 void LCDdrawChar(uint8_t c, uint8_t row, uint8_t col);

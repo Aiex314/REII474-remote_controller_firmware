@@ -285,20 +285,87 @@ void LCDxorRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
   }
 }
 
-void LCDdrawBitmap(const uint8_t* bitmap, uint16_t len) {
-  memcpy(LCDscreenBuffer, bitmap, len);
-  memset(LCDbufferDirty, 1, len);
+
+// This accepts a 1BPP array representing the image data, where the pixel
+// data is densely packed (i.e. 8 pixels per byte, not separated by row)
+// The width, height, x and y position need to be specified correctly,
+// otherwise the remote will crash.
+//
+// This website: https://notisrac.github.io/FileToCArray/
+// will generate the image in the correct format.
+void LCDdrawBitmap(const uint8_t* bitmap, uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
+  // Rectangle alignment variables
+  uint8_t startIndexX = x/8, endIndexX = (w+x)/8;
+  uint8_t startIndexY = y,   endIndexY = y+h;
+  uint8_t startParity = x%8, endParity = (w+x)%8;
+
+  // Masks for left and rightmost bytes
+  uint8_t l_mask = LEFT_BYTE(startParity);
+  uint8_t r_mask = RIGHT_BYTE(endParity);
+  if (startIndexX == endIndexX) l_mask &= r_mask;
+
+  // This holds the current pixel data to write to the image buffer
+  // in its upper byte. The pixel data is shifted through this var-
+  // iable, and fed through via the lower byte
+  uint16_t cur_data = bitmap[0] << 8, cur_data_index = 0;
+  uint8_t  lo_byte_width = 0;
+
+  // Copy the image into the buffer
+  for (uint8_t i_y = startIndexY; i_y < endIndexY; i_y++) {
+	for (uint8_t i_x = startIndexX; i_x <= endIndexX; i_x++) {
+      if (i_x == endIndexX && endParity == 0) continue;
+
+//      if (lo_byte_width == 0) {
+//    	lo_byte_width = 8;
+//    	cur_data += bitmap[++cur_data_index];
+//      }
+
+      uint16_t bufIdx = i_y*16 + i_x;
+
+      uint8_t cur_buf_data = LCDscreenBuffer[bufIdx];
+      uint8_t cur_bmp_data = cur_data >> 8;
+
+      uint8_t bits_consumed = 0;
+
+      if (i_x == startIndexX && startParity != 0) {
+        LCDscreenBuffer[bufIdx] = (cur_buf_data & ~l_mask) | (cur_bmp_data >> startParity);
+        bits_consumed = 8-startParity;
+      }
+      else if (i_x == endIndexX && endParity != 0) {
+    	LCDscreenBuffer[bufIdx] = (cur_buf_data & ~r_mask) | (cur_bmp_data & r_mask);
+    	bits_consumed = endParity;
+      }
+      else {
+    	LCDscreenBuffer[bufIdx] = cur_bmp_data;
+    	bits_consumed = 8;
+      }
+
+      if (bits_consumed > lo_byte_width) {
+    	cur_data <<= lo_byte_width;
+        bits_consumed -= lo_byte_width;
+        lo_byte_width = 8;
+        cur_data += bitmap[++cur_data_index];
+      }
+      cur_data <<= bits_consumed;
+      lo_byte_width -= bits_consumed;
+
+      LCDbufferDirty[bufIdx] = 0x01;
+    }
+  }
+
+//  memcpy(LCDscreenBuffer, bitmap, w*h/8);
+//  memset(LCDbufferDirty, 1, w*h/8);
 }
 
 void LCDdrawBootScreen() {
-  LCDdrawBitmap(boot_screen_bitmap, 1024);
+  LCDdrawBitmap(boot_screen_bitmap, 0, 0, 128, 64);
 }
 
 void LCDdrawChar(uint8_t c, uint8_t row, uint8_t col) {
-  uint16_t char_index = (127-c) * 8;
+  uint16_t char_index = c * 8;
 
   for (uint8_t i=0; i<8; i++) {
-    uint16_t line = font_array[7-i+char_index] << (8-(col%8));
+    uint16_t line = font_array[i+char_index] << (8-(col%8));
     uint16_t mask = 0xfc << (8-(col%8));
 
     uint16_t buf_idx = (col/8) + (row+i)*16;

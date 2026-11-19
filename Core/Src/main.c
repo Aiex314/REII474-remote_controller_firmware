@@ -29,6 +29,9 @@
 #include "message_protocol.h"
 
 #include "command_processor.h"
+
+#include "bitmaps.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,6 +41,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define PI 3.14159265358979323
+const float RADS_TO_RPM = 60/(2*PI);
 
 /* USER CODE END PD */
 
@@ -87,12 +93,36 @@ uint16_t POT_result = 2048;
 
 RWP_MODE rwp_mode = RWP_MODE_HALTED;
 RWP_DATA_KIND rwp_data = SENSOR_DATA;
+RWP_CTRL_MODE rwp_ctrl = RWP_CTRL_LINEAR;
 
 uint8_t control_mode;
 float rpm = 0.0, pitch, roll, yaw;
 float v_a, v_b, v_c, v_d, v_e, v_f, ctrl_value;
 
+
+typedef enum {
+  MAIN_MENU,
+  MANUAL_MENU,
+  AUTO_MENU,
+  DEMO_MENU,
+  CALIBRATION_MENU,
+  HELP_MENU,
+  DEBUG_MENU,
+  EASTER_EGG_MENU,
+  ERROR_ACKNOWLEDGE,
+  CONNECTION_PENDING
+} rmt_mode;
+
+rmt_mode cur_rmt_mode  = MAIN_MENU;
+rmt_mode prev_rmt_mode = MAIN_MENU;
+
+int8_t menu_sel_index = 0;
+uint16_t frame_counter = 0;
+
 uint8_t button_state[4] = {0};
+
+static uint8_t assistance_mode;
+
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
   static uint32_t tick_count = 0;
@@ -109,10 +139,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
       readNRF24payload(rwp_message.bytes, 32);
 
       if (rwp_message.control_data.data_type == SENSOR_DATA) {
+    	// Get the sensor readings
         rpm   = rwp_message.sensor_data.RPM;
         pitch = rwp_message.sensor_data.pitch;
         roll  = rwp_message.sensor_data.roll;
         yaw   = rwp_message.sensor_data.yaw;
+
+        // Get the RWP's control mode
+        rwp_ctrl = rwp_message.sensor_data.ctrl_mode;
 
         if (getDebug() == 1) {
           char buffer[256];
@@ -143,6 +177,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
           putString((uint8_t*)buffer, len);
         }
       }
+
 
       // Clear TX DS interrupt
       writeNRF24register(N24_STATUS, status | 0b00100000);
@@ -215,24 +250,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
   }
 }
 
-typedef enum {
-  MAIN_MENU,
-  MANUAL_MENU,
-  AUTO_MENU,
-  CALIBRATION_MENU,
-  HELP_MENU,
-  DEBUG_MENU,
-  EASTER_EGG_MENU,
-  ERROR_ACKNOWLEDGE,
-  CONNECTION_PENDING
-} rmt_mode;
-
-rmt_mode cur_rmt_mode  = DEBUG_MENU;
-rmt_mode prev_rmt_mode = DEBUG_MENU;
-
-int8_t menu_sel_index = 0;
-uint16_t frame_counter = 0;
-
 void btnSelect() {
   switch (cur_rmt_mode) {
     case DEBUG_MENU:
@@ -240,15 +257,18 @@ void btnSelect() {
       else rwp_mode = RWP_MODE_MANUAL;
       break;
     case ERROR_ACKNOWLEDGE:
+      rwp_mode = RWP_MODE_HALTED;
       cur_rmt_mode = MAIN_MENU;
       break;
     case MAIN_MENU: {
       rmt_mode entry_mode[] = {
         MANUAL_MENU,
         AUTO_MENU,
+//        DEMO_MENU,
         CALIBRATION_MENU,
         HELP_MENU,
-        DEBUG_MENU
+        DEBUG_MENU,
+        EASTER_EGG_MENU
       };
 
       cur_rmt_mode = entry_mode[menu_sel_index];
@@ -260,13 +280,12 @@ void btnSelect() {
 
 void btnBack() {
   switch (cur_rmt_mode) {
-    case DEBUG_MENU:
-      cur_rmt_mode = MAIN_MENU;
-      rwp_mode = RWP_MODE_HALTED;
+    case MAIN_MENU:
       break;
     default:
       cur_rmt_mode = MAIN_MENU;
       rwp_mode = RWP_MODE_HALTED;
+      menu_sel_index = 0;
       break;
   }
 }
@@ -287,7 +306,8 @@ void btnUp() {
 void btnDown() {
   switch (cur_rmt_mode) {
     case DEBUG_MENU:
-      if (rwp_mode != RWP_MODE_CALIBRATION) rwp_mode = RWP_MODE_CALIBRATION;
+      if (rwp_data == CONTROL_DATA) rwp_data = SENSOR_DATA;
+      else rwp_data = CONTROL_DATA;
       break;
     default:
       ++menu_sel_index;
@@ -300,7 +320,7 @@ void btnDown() {
 void btnHandler() {
   // Buttons ordered from top left to bottom right
   static uint8_t prev_state[4] = {0, 0, 0, 0};
-  void (*btnFn[4])() = {&btnSelect, &btnUp, &btnBack, &btnDown};
+  void (*btnFn[4])() = {&btnBack, &btnUp, &btnSelect, &btnDown};
 
   for (int i=0; i<4; i++) {
     if (prev_state[i] == 0 && button_state[i] == 1) {
@@ -318,6 +338,20 @@ void btnHandler() {
 void updateDisplay() {
   // General purpose string buffer
   uint8_t buffer[32];
+
+  // Detect button presses for UI
+  static uint8_t prev_state[4] = {0};
+  uint8_t btn_pressed[4] = {0};
+  for (int i=0; i<4; i++) {
+    btn_pressed[i] = 0;
+    if (prev_state[i] == 0 && button_state[i] == 1) {
+      prev_state[i] = 1;
+      btn_pressed[i] = 1;
+    }
+    else if (button_state[i] == 0) {
+      prev_state[i] = 0;
+    }
+  }
 
   // When switching remote modes, completely clear the buffer
   static rmt_mode last_rmt_mode = DEBUG_MENU;
@@ -350,6 +384,17 @@ void updateDisplay() {
 
       sprintf((char*)buffer, "R    %6.2f", roll);
       LCDdrawString(buffer, 11, 54, 0);
+
+
+      LCDdrawRect(67, 27, 60, 37, 0);
+
+      char* s = "????";
+      if (rwp_ctrl == RWP_CTRL_NONE || rwp_mode != RWP_MODE_AUTO) s = "NONE";
+      else if (rwp_ctrl == RWP_CTRL_LINEAR) s = "LINR";
+      else if (rwp_ctrl == RWP_CTRL_SWINGUP) s = "SWUP";
+      else if (rwp_ctrl == RWP_CTRL_SWINGDOWN) s = "SWDN";
+      sprintf((char*)buffer, "CMODE %s", s);
+      LCDdrawString(buffer, 10, 37, 68);
     }
     else {
       sprintf((char*)buffer, "CVAL %6.3f", ctrl_value);
@@ -380,6 +425,7 @@ void updateDisplay() {
     else if (rwp_mode == RWP_MODE_HALTED) s = "HALT";
     else if (rwp_mode == RWP_MODE_CALIBRATION) s = "CALI";
     else if (rwp_mode == RWP_MODE_LOCK) s = "LOCK";
+    else if (rwp_mode == RWP_MODE_DEMO) s = "DEMO";
     sprintf((char*)buffer, "MODE  %s", s);
     LCDdrawString(buffer, 10, 28, 68);
 
@@ -388,6 +434,7 @@ void updateDisplay() {
     break;
   case MAIN_MENU:
     // Header
+    LCDclearBuffer(0x00);
     LCDdrawString((uint8_t*)"Menu", 4, 1, 51);
     LCDdrawRect(1, 9, 126, 1, 1);
 
@@ -395,6 +442,7 @@ void updateDisplay() {
     char* menu_entries[] = {
       "Manual mode",
       "Automatic mode",
+//      "Demo mode",
       "Calibration",
       "Help",
       "Debug",
@@ -403,18 +451,31 @@ void updateDisplay() {
 
     // Set menu length based on what has been unlocked...
     uint8_t l = 4;
-    if (getDebug()) l = 6;
+    if (getDebug()) l = 5;
 
     menu_sel_index = (l+menu_sel_index) % l;
 
-    for (uint8_t i=0; i<l; i++) {
-      if (i == menu_sel_index)
-        LCDdrawEmphString((uint8_t*)menu_entries[i], strlen(menu_entries[i]), 10*i + 11, 1);
+    static uint8_t start_index = 0;
+    if (menu_sel_index < start_index) start_index = menu_sel_index;
+    while (menu_sel_index - start_index > 4) start_index++;
+
+    for (uint8_t i=0; i<5; i++) {
+      if (i == l) break;
+
+      uint8_t idx = i+start_index;
+      if (idx == menu_sel_index)
+        LCDdrawEmphString((uint8_t*)menu_entries[idx], strlen(menu_entries[idx]), 10*i + 11, 1);
       else
-        LCDdrawStringDeemph((uint8_t*)menu_entries[i], strlen(menu_entries[i]), 10*i + 11, 1);
+        LCDdrawStringDeemph((uint8_t*)menu_entries[idx], strlen(menu_entries[idx]), 10*i + 11, 1);
     }
+
+    if (l - start_index > 5) LCDdrawString("v", 1, 56, 121);
+    if (start_index > 0) LCDdrawString("^", 1, 11, 121);
     break;
-  case MANUAL_MENU: {
+  case MANUAL_MENU:
+    // Menu selection bounds
+    menu_sel_index = (2+menu_sel_index) % 2;
+
     // Check whether potentiometer is centered when entering menu
     static uint8_t pot_check = 0;
     if (new_menu) {
@@ -429,26 +490,164 @@ void updateDisplay() {
       }
       else {
         // Print message while potentiometer is not centered
-        LCDdrawString((uint8_t*)"Set knob to 0", 13, 11, 1);
+        LCDdrawString((uint8_t*)"Please set knob to 0", 20, 28, 4);
         break;
       }
-    }
     }
     // Header
     LCDdrawString((uint8_t*)"Manual mode", 11, 1, 31);
     LCDdrawRect(1, 9, 126, 1, 1);
+    LCDdrawBitmap(back_icon_bitmap, 1, 1, 8, 8);
 
     // Print the current control value
     float ctrl_val = (POT_result-2048)/2048.0;
-    sprintf((char*)buffer, "Knob value:% 2.03f", ctrl_val);
-    LCDdrawString(buffer, 18, 11, 1);
+    sprintf((char*)buffer, "Knob value:    % 2.03f", ctrl_val);
+    LCDdrawString(buffer, 21, 11, 1);
+
+    // Difficulty selector
+    if (new_menu) assistance_mode = 0;
+    const char* assistance_names[] = {
+      "Easy",
+      "Med.",
+      "Hard",
+    };
+    LCDdrawString((uint8_t*)"Difficulty:", 11, 19, 1);
+    if (menu_sel_index == 0) {
+      LCDdrawEmphString((uint8_t*)assistance_names[assistance_mode], 4, 19, 103);
+
+      if (btn_pressed[2] && !new_menu) assistance_mode = (1+assistance_mode)%3;
+    }
+    else
+      LCDdrawStringDeemph((uint8_t*)assistance_names[assistance_mode], 4, 19, 103);
 
     break;
   case AUTO_MENU:
     // Header
     LCDdrawString((uint8_t*)"Auto mode", 9, 1, 37);
     LCDdrawRect(1, 9, 126, 1, 1);
+    LCDdrawBitmap(back_icon_bitmap, 1, 1, 8, 8);
 
+    // Instruction
+	LCDdrawString("Press select to", 15, 11, 19);
+	LCDdrawString("toggle Auto mode", 16, 19, 16);
+
+	// State
+	static uint8_t cur_mode = 0;
+	const char* mode_names[] = {
+	  "HALT",
+	  "AUTO"
+	};
+	const RWP_MODE modes[] = {
+	  RWP_MODE_HALTED,
+	  RWP_MODE_AUTO
+	};
+
+    menu_sel_index = (3+menu_sel_index) % 3;
+
+    if (new_menu) cur_mode = menu_sel_index = 0;
+
+	LCDdrawString("State:", 6, 37, 34);
+	LCDdrawString(mode_names[cur_mode], 4, 37, 76);
+
+	if (btn_pressed[2] && !new_menu) {
+	  cur_mode = 1-cur_mode;
+	}
+
+	rwp_mode = modes[cur_mode];
+
+	rwp_data = CONTROL_DATA;
+
+	switch (menu_sel_index) {
+	  case 0:
+		sprintf((char*)buffer, "P. Angle: %5.2frad  ", v_a);
+		break;
+	  case 1:
+		sprintf((char*)buffer, "P. Speed: %5.2frad/s", v_b);
+		break;
+	  case 2:
+		sprintf((char*)buffer, "RW.Speed: %5.2fRPM  ", v_c*RADS_TO_RPM);
+		break;
+	}
+
+	LCDdrawString(buffer, 20, 46, 4);
+
+    break;
+  case CALIBRATION_MENU:
+	// Is calibration complete yet?
+	static uint8_t sys_calibrated = 0;
+	static uint8_t calibrate_tick = 0;
+
+	// Header
+	LCDdrawString((uint8_t*)"Calibration", 11, 1, 31);
+	LCDdrawRect(1, 9, 126, 1, 1);
+    LCDdrawBitmap(back_icon_bitmap, 1, 1, 8, 8);
+
+	// Instruction
+	LCDdrawString("Balance pendulum in", 19, 11, 1);
+	LCDdrawString("upright position, &", 19, 19, 1);
+	LCDdrawString("press confirm.", 14, 28, 1);
+
+	// After calibration, display confirmation
+	LCDdrawRect(22, 54, 84, 8, 0);
+	if (sys_calibrated == 0) {
+	  rwp_mode = RWP_MODE_HALTED;
+	  LCDdrawString("Waiting...", 10, 54, 34);
+
+	  if (btn_pressed[2] && !new_menu) {
+	    sys_calibrated = 1;
+	    calibrate_tick = 10;
+	  }
+	}
+	else if (calibrate_tick != 0) {
+	  rwp_mode = RWP_MODE_CALIBRATION;
+
+	  --calibrate_tick;
+	  LCDdrawString("Calibrating...", 14, 54, 22);
+	}
+	else {
+	  rwp_mode = RWP_MODE_HALTED;
+	  LCDdrawString("Calibrated!", 11, 54, 31);
+
+	  if (btn_pressed[2] && !new_menu) {
+		sys_calibrated = 1;
+		calibrate_tick = 10;
+	  }
+	}
+	break;
+  case HELP_MENU:
+	LCDdrawString((uint8_t*)"Help", 4, 1, 52);
+	LCDdrawRect(1, 9, 126, 1, 1);
+	LCDdrawBitmap(back_icon_bitmap, 1, 1, 8, 8);
+
+    menu_sel_index = (4+menu_sel_index) % 4;
+
+    if (new_menu) menu_sel_index = 0;
+
+	uint8_t* bitmap_array[] = {
+	  help_1,
+	  help_2,
+	  help_3,
+	  help_4
+	};
+
+	LCDdrawBitmap(bitmap_array[menu_sel_index], 1, 10, 128, 53);
+
+	break;
+  case ERROR_ACKNOWLEDGE:
+    // Display the error
+    LCDdrawEmphString("RWIP fault:", 11, 1, 1);
+
+    uint8_t err_idx = rwp_mode-0x80;
+    const char* err_msgs[] = {
+      "Pendulum Overspeed",
+      "Impact detected"
+    };
+    uint8_t msg_len = strlen(err_msgs[err_idx]);
+    LCDdrawString(err_msgs[err_idx], msg_len, 28, 64-3*msg_len);
+
+    LCDdrawRect(56, 51, 16, 12, 1);
+    LCDdrawRect(57, 52, 14, 11, 0);
+    LCDdrawString("OK", 2, 53, 58);
     break;
   default:
     LCDdrawString((uint8_t*)"Bad menu ID", 11, 1, 1);
@@ -508,6 +707,7 @@ int main(void)
   // Initialize the LCD
   LCDinit();
   LCDsetGraphicMode(1);
+  LCDclearBuffer(0);
   LCDdrawBootScreen();
   LCDupdateFromBuffer();
 
@@ -529,16 +729,13 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  uint8_t x = 0;
   while (1)
   {
+    // UI refreshes at 20Hz
+    btnHandler();
     updateDisplay();
-
-    // Hack to run the button handler at 100Hz, and the screen at 10Hz
-    for (int i=0; i<10; i++) {
-      HAL_Delay(10);
-      btnHandler();
-    }
-
+    HAL_Delay(50);
 
 
 	// Cool demo :)
